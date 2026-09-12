@@ -32,7 +32,6 @@ def model(vals):
                    .05 * pct(pd.Series({x: int(x in last) for x in nums})))
     return freq, rc, gaps, last, score.sort_values(ascending=False)
 
-# Funciones independientes para analizar cada patrón según su propia cantidad de sorteos
 def analyze_rep_inter(vals, n):
     sub = vals[:min(len(vals), n)]
     rep = set()
@@ -65,7 +64,7 @@ def generate(score, amount, seed, exclude_nums=set()):
     top = list(filtered_score.index)
     
     if len(top) < 20:
-        st.error("Se descartaron demasiados números. No quedan suficientes candidatos para armar combinaciones de 20 números.")
+        st.error(f"Se descartaron demasiado números ({len(exclude_nums)} números excluidos). Quedan {len(top)} candidatos, pero se necesitan al menos 20 para armar las líneas.")
         return []
 
     lines = []
@@ -93,14 +92,18 @@ def generate(score, amount, seed, exclude_nums=set()):
                 break
     return lines
 
-def backtest(vals, cases):
+def backtest(vals, cases, exclude_nums=set()):
     rows = []
     for i in range(1, min(len(vals) - 1, cases) + 1):
         hist = vals[i + 1:]
         if len(hist) < 30: 
             break
         _, _, _, _, s = model(hist)
-        top20 = list(s.index[:20])
+        
+        # Filtrar score eliminando los números descartados
+        s_filtered = s[~s.index.isin(exclude_nums)]
+        top20 = list(s_filtered.index[:20])
+        
         ganadores = list(vals[i])
         coincidencias = sorted(list(set(top20) & set(ganadores)))
         
@@ -130,12 +133,40 @@ except Exception as e:
     st.stop()
 
 freq, rc, gaps, last, score = model(vals)
+
+# --- CONFIGURACIÓN DE FILTROS Y DESCARTE EN SIDEBAR O ANTES DE TABS ---
+st.sidebar.header("🧹 Filtros de Descarte Global")
+
+n_inter = st.sidebar.number_input("Sorteos (Rep. entre sorteos)", 2, len(vals), 15, key="n_inter")
+f_inter = st.sidebar.checkbox("Excluir rep. entre sorteos", value=False, key="f_inter")
+
+n_intra = st.sidebar.number_input("Sorteos (Rep. internas)", 1, len(vals), 10, key="n_intra")
+f_intra = st.sidebar.checkbox("Excluir rep. internas", value=False, key="f_intra")
+
+n_cons = st.sidebar.number_input("Sorteos (Consecutivos)", 1, len(vals), 15, key="n_cons")
+f_cons = st.sidebar.checkbox("Excluir consecutivos", value=False, key="f_cons")
+
+f_ult1 = st.sidebar.checkbox("Excluir ÚLTIMO sorteo", value=False, key="f_ult1")
+f_ult2 = st.sidebar.checkbox("Excluir PENÚLTIMO sorteo", value=False, key="f_ult2")
+
+# Calcular conjunto de descartes
+nums_a_excluir = set()
+if f_inter: nums_a_excluir.update(analyze_rep_inter(vals, n_inter))
+if f_intra: nums_a_excluir.update(analyze_rep_intra(vals, n_intra))
+if f_cons: nums_a_excluir.update(analyze_consecutivos(vals, n_cons))
+if f_ult1: nums_a_excluir.update(vals[0])
+if f_ult2 and len(vals) > 1: nums_a_excluir.update(vals[1])
+
+if nums_a_excluir:
+    st.sidebar.warning(f"🚫 {len(nums_a_excluir)} números excluidos de los 100.")
+
 t1, t2, t3, t4, t5 = st.tabs(["🏆 Ranking", "🔗 Patrones", "🧹 Filtros/Descarte", "🧪 Backtesting", "🎟️ Generador"])
 
 with t1:
     r = pd.DataFrame({
         "Ranking": range(1, 101),
         "Número": [f"{x:02d}" for x in score.index],
+        "Excluido": ["SI" if x in nums_a_excluir else "NO" for x in score.index],
         "Índice": [round(score[x], 2) for x in score.index],
         "Histórico": [int(freq[x]) for x in score.index],
         "Últ.5": [int(rc[5][x]) for x in score.index],
@@ -170,65 +201,34 @@ with t2:
     }), use_container_width=True)
 
 with t3:
-    st.header("🧹 Descarte de Números por Patrones Recientes")
+    st.header("🧹 Resumen de Filtros de Descarte Aplicados")
+    st.write("Los controles de descarte se encuentran activos en la **barra lateral (Sidebar)** a la izquierda para aplicarse globalmente a todas las pestañas.")
     
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        st.subheader("🔄 Repetidos entre sorteos")
-        n_inter = st.number_input("Sorteos a analizar (Rep. entre sorteos)", min_value=2, max_value=len(vals), value=15, step=1, key="n_inter")
-        rep_inter = analyze_rep_inter(vals, n_inter)
-        st.info(", ".join(f"{x:02d}" for x in sorted(rep_inter)) if rep_inter else "Ninguno")
-        filt_inter = st.checkbox("Excluir repetidos entre sorteos", value=False, key="f_inter")
-        
+        st.subheader("🔄 Rep. entre sorteos")
+        rep_i = analyze_rep_inter(vals, n_inter)
+        st.info(", ".join(f"{x:02d}" for x in sorted(rep_i)) if rep_i else "Ninguno")
     with col2:
-        st.subheader("🔁 Repeticiones internas")
-        n_intra = st.number_input("Sorteos a analizar (Rep. internas)", min_value=1, max_value=len(vals), value=10, step=1, key="n_intra")
-        rep_intra = analyze_rep_intra(vals, n_intra)
-        st.info(", ".join(f"{x:02d}" for x in sorted(rep_intra)) if rep_intra else "Ninguno")
-        filt_intra = st.checkbox("Excluir repeticiones internas", value=False, key="f_intra")
-        
+        st.subheader("🔁 Rep. internas")
+        rep_a = analyze_rep_intra(vals, n_intra)
+        st.info(", ".join(f"{x:02d}" for x in sorted(rep_a)) if rep_a else "Ninguno")
     with col3:
         st.subheader("🔢 Consecutivos")
-        n_cons = st.number_input("Sorteos a analizar (Consecutivos)", min_value=1, max_value=len(vals), value=15, step=1, key="n_cons")
-        consecutivos = analyze_consecutivos(vals, n_cons)
-        st.info(", ".join(f"{x:02d}" for x in sorted(consecutivos)) if consecutivos else "Ninguno")
-        filt_cons = st.checkbox("Excluir consecutivos", value=False, key="f_cons")
+        c_set = analyze_consecutivos(vals, n_cons)
+        st.info(", ".join(f"{x:02d}" for x in sorted(c_set)) if c_set else "Ninguno")
 
     st.divider()
-    
-    # Módulo adicional: Último y Penúltimo Sorteo
-    st.subheader("📌 Descarte del Último y Penúltimo Sorteo")
-    col_u1, col_u2 = st.columns(2)
-    
-    ult_1 = set(vals[0])
-    ult_2 = set(vals[1]) if len(vals) > 1 else set()
-    
-    with col_u1:
-        st.write("**Último Sorteo (Sorteo más reciente):**")
-        st.info(", ".join(f"{x:02d}" for x in sorted(ult_1)))
-        filt_ult1 = st.checkbox("Excluir números del ÚLTIMO sorteo", value=False, key="f_ult1")
-        
-    with col_u2:
-        st.write("**Penúltimo Sorteo:**")
-        st.info(", ".join(f"{x:02d}" for x in sorted(ult_2)) if ult_2 else "No disponible")
-        filt_ult2 = st.checkbox("Excluir números del PENÚLTIMO sorteo", value=False, key="f_ult2")
-
-    # Consolidación final de números a descartar
-    nums_a_excluir = set()
-    if filt_inter: nums_a_excluir.update(rep_inter)
-    if filt_intra: nums_a_excluir.update(rep_intra)
-    if filt_cons: nums_a_excluir.update(consecutivos)
-    if filt_ult1: nums_a_excluir.update(ult_1)
-    if filt_ult2: nums_a_excluir.update(ult_2)
-    
-    st.divider()
-    st.subheader(f"🚫 Total de números descartados ({len(nums_a_excluir)} de 100):")
-    st.warning(", ".join(f"{x:02d}" for x in sorted(nums_a_excluir)) if nums_a_excluir else "Sin números descartados.")
+    st.subheader(f"🚫 Total descartados ({len(nums_a_excluir)} de 100):")
+    st.warning(", ".join(f"{x:02d}" for x in sorted(nums_a_excluir)) if nums_a_excluir else "Sin descartes activos.")
 
 with t4:
+    st.header("🧪 Backtesting")
+    if nums_a_excluir:
+        st.info(f"ℹ️ Evaluando rendimiento excluyendo {len(nums_a_excluir)} números marcados en los filtros.")
+    
     cases = st.slider("Cantidad de sorteos históricos a evaluar", 20, 300, 100)
-    bt = backtest(vals, cases)
+    bt = backtest(vals, cases, exclude_nums=nums_a_excluir)
     if len(bt):
         avg = bt.Aciertos_Top20.mean()
         over = (bt.Aciertos_Top20 > 4).mean() * 100
@@ -242,14 +242,14 @@ with t4:
         st.warning("No hay suficientes sorteos.")
 
 with t5:
+    st.header("🎟️ Generador de Líneas")
     amount = st.slider("Cantidad de líneas", 5, 100, 20)
     seed = st.number_input("Semilla", value=20260911, step=1)
     
-    nums_excluidos_gen = nums_a_excluir if 'nums_a_excluir' in locals() else set()
-    if nums_excluidos_gen:
-        st.info(f"ℹ️ Generando líneas excluyendo {len(nums_excluidos_gen)} números marcados en la pestaña 'Filtros/Descarte'.")
+    if nums_a_excluir:
+        st.info(f"ℹ️ Generando líneas excluyendo {len(nums_a_excluir)} números descartados.")
         
-    lines = generate(score, amount, seed, exclude_nums=nums_excluidos_gen)
+    lines = generate(score, amount, seed, exclude_nums=nums_a_excluir)
     if lines:
         out = pd.DataFrame(
             [[i + 1] + [f"{x:02d}" for x in line] for i, line in enumerate(lines)],
