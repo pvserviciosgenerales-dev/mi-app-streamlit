@@ -16,7 +16,56 @@ def prepare(df):
     X = df[cols].apply(pd.to_numeric, errors="coerce").dropna(how="all")
     return X.astype(int).values
 
-def model(vals):
+def get_adaptive_weights(vals, lookback=15):
+    """
+    Evalúa qué métricas tuvieron mayor precisión en los últimos 'lookback' sorteos
+    y retorna pesos optimizados dinámicamente.
+    """
+    if len(vals) < lookback + 30:
+        return {"w_freq": 0.30, "w_rc10": 0.25, "w_rc30": 0.15, "w_rc20": 0.10, "w_gap": 0.15, "w_last": 0.05}
+
+    scores = {"freq": 0, "rc10": 0, "rc30": 0, "rc20": 0, "gap": 0, "last": 0}
+    nums = range(100)
+
+    for i in range(1, lookback + 1):
+        hist = vals[i:]
+        actual = set(vals[i-1])
+        n = len(hist)
+
+        f = pd.Series(hist.ravel()).value_counts().reindex(nums, fill_value=0)
+        r10 = pd.Series(hist[:min(10, n)].ravel()).value_counts().reindex(nums, fill_value=0)
+        r20 = pd.Series(hist[:min(20, n)].ravel()).value_counts().reindex(nums, fill_value=0)
+        r30 = pd.Series(hist[:min(30, n)].ravel()).value_counts().reindex(nums, fill_value=0)
+
+        gaps = {}
+        for x in nums:
+            rows = np.where((hist == x).any(axis=1))[0]
+            gaps[x] = int(rows[0]) if len(rows) else n
+        g_series = pd.Series({x: 1 / (gaps[x] + 1) for x in nums})
+
+        last_set = pd.Series({x: int(x in set(hist[0])) for x in nums})
+
+        scores["freq"] += len(set(f.nlargest(20).index) & actual)
+        scores["rc10"] += len(set(r10.nlargest(20).index) & actual)
+        scores["rc20"] += len(set(r20.nlargest(20).index) & actual)
+        scores["rc30"] += len(set(r30.nlargest(20).index) & actual)
+        scores["gap"] += len(set(g_series.nlargest(20).index) & actual)
+        scores["last"] += len(set(last_set.nlargest(20).index) & actual)
+
+    total = sum(scores.values())
+    if total == 0:
+        return {"w_freq": 0.30, "w_rc10": 0.25, "w_rc30": 0.15, "w_rc20": 0.10, "w_gap": 0.15, "w_last": 0.05}
+
+    return {
+        "w_freq": round(scores["freq"] / total, 3),
+        "w_rc10": round(scores["rc10"] / total, 3),
+        "w_rc30": round(scores["rc30"] / total, 3),
+        "w_rc20": round(scores["rc20"] / total, 3),
+        "w_gap": round(scores["gap"] / total, 3),
+        "w_last": round(scores["last"] / total, 3)
+    }
+
+def model(vals, weights=None):
     n = len(vals)
     nums = range(100)
     freq = pd.Series(vals.ravel()).value_counts().reindex(nums, fill_value=0)
@@ -27,9 +76,18 @@ def model(vals):
         gaps[x] = int(rows[0]) if len(rows) else n
     last = set(vals[0])
     pct = lambda s: s.rank(pct=True, method="average")
-    score = 100 * (.30 * pct(freq) + .25 * pct(rc[10]) + .15 * pct(rc[30]) + .10 * pct(rc[20]) +
-                   .15 * pct(pd.Series({x: 1 / (gaps[x] + 1) for x in nums})) +
-                   .05 * pct(pd.Series({x: int(x in last) for x in nums})))
+
+    if weights is None:
+        weights = {"w_freq": 0.30, "w_rc10": 0.25, "w_rc30": 0.15, "w_rc20": 0.10, "w_gap": 0.15, "w_last": 0.05}
+
+    score = 100 * (
+        weights["w_freq"] * pct(freq) +
+        weights["w_rc10"] * pct(rc[10]) +
+        weights["w_rc30"] * pct(rc[30]) +
+        weights["w_rc20"] * pct(rc[20]) +
+        weights["w_gap"] * pct(pd.Series({x: 1 / (gaps[x] + 1) for x in nums})) +
+        weights["w_last"] * pct(pd.Series({x: int(x in last) for x in nums}))
+    )
     return freq, rc, gaps, last, score.sort_values(ascending=False)
 
 def analyze_rep_inter(vals, n):
@@ -59,34 +117,27 @@ def analyze_consecutivos(vals, n):
     return cons
 
 def select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclude_nums):
-    # Filtrar descartados
     available_score = score[~score.index.isin(exclude_nums)]
     available = list(available_score.index)
-    
+
     if len(available) < line_size:
         return []
 
     if strategy == "🔥 Números Calientes":
-        # Priorizar números con mayor frecuencia reciente/general
         candidates = list(available_score.head(max(line_size * 2, 20)).index)
     elif strategy == "🧊 Fríos / Atrasados":
-        # Priorizar números con mayor atraso (gap)
         sorted_by_gap = pd.Series(gaps)[available].sort_values(ascending=False)
         candidates = list(sorted_by_gap.head(max(line_size * 2, 20)).index)
     elif strategy == "⚖️ Mixta Equilibrada":
-        # Balance entre calientes (top), fríos y medio
         p1 = available[:max(1, int(len(available)*0.3))]
         p2 = available[int(len(available)*0.3):int(len(available)*0.7)]
         p3 = available[int(len(available)*0.7):]
         candidates = p1 + p2 + p3
     elif strategy == "🎯 Zonas Activas":
-        # Priorizar decenas con más actividad
         decenas = pd.Series([x // 10 for x in available]).value_counts()
         top_decenas = decenas.head(4).index
         candidates = [x for x in available if x // 10 in top_decenas]
     elif strategy == "🔗 Arrastres Recientes":
-        # Parejas frecuentes con el último sorteo
-        last_nums = set(vals[0])
         pair_counts = {}
         for row in vals[:20]:
             for x in set(row):
@@ -95,7 +146,6 @@ def select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclu
         sorted_arrastre = sorted(pair_counts.keys(), key=lambda k: pair_counts[k], reverse=True)
         candidates = sorted_arrastre if len(sorted_arrastre) >= line_size else available
     elif strategy == "🔄 Repetición Sorteo Anterior":
-        # Forzar que incluya números de la jugada anterior (no descartados)
         last_avail = [x for x in vals[0] if x in available]
         candidates = last_avail + [x for x in available if x not in last_avail]
     else:
@@ -108,10 +158,10 @@ def select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclu
 
 def generate(score, freq, gaps, last, vals, amount, seed, line_size=20, strategy="⚖️ Mixta Equilibrada", exclude_nums=set()):
     rng = random.Random(int(seed))
-    
     candidates = select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclude_nums)
+
     if len(candidates) < line_size:
-        st.error(f"No hay suficientes números candidatos ({len(candidates)}) para armar líneas de {line_size} números con los descartes actuales.")
+        st.error(f"No hay suficientes números candidatos ({len(candidates)}) para armar líneas de {line_size} números.")
         return []
 
     lines = []
@@ -120,35 +170,34 @@ def generate(score, freq, gaps, last, vals, amount, seed, line_size=20, strategy
             sample_k = min(len(candidates), max(line_size + 5, int(line_size * 1.5)))
             pool = rng.sample(candidates[:sample_k], line_size)
             comb = set(pool)
-            
-            if len(comb) != line_size: 
+
+            if len(comb) != line_size:
                 continue
-            
-            # Validación de paridad y dispersión adaptada según el tamaño de la línea
+
             odd = sum(x % 2 for x in comb)
             min_odd = int(line_size * 0.35)
             max_odd = int(line_size * 0.65) + 1
-            
+
             if min_odd <= odd <= max_odd and not any(len(comb & set(o)) >= line_size for o in lines):
                 lines.append(sorted(comb))
                 break
 
     return lines
 
-def backtest(vals, cases, exclude_nums=set()):
+def backtest(vals, cases, exclude_nums=set(), weights=None):
     rows = []
     for i in range(1, min(len(vals) - 1, cases) + 1):
         hist = vals[i + 1:]
-        if len(hist) < 30: 
+        if len(hist) < 30:
             break
-        _, _, _, _, s = model(hist)
-        
+        _, _, _, _, s = model(hist, weights=weights)
+
         s_filtered = s[~s.index.isin(exclude_nums)]
         top20 = list(s_filtered.index[:20])
-        
+
         ganadores = list(vals[i])
         coincidencias = sorted(list(set(top20) & set(ganadores)))
-        
+
         rows.append({
             "Indice_sorteo": i,
             "Aciertos_Top20": len(coincidencias),
@@ -163,22 +212,31 @@ if uploaded:
     df = pd.read_excel(uploaded)
 else:
     default = "/mnt/data/Extracto_Loteria_Chaquena_Ultimas_2_Cifras_para análisis.xlsx"
-    if os.path.exists(default): 
+    if os.path.exists(default):
         df = pd.read_excel(default)
-    else: 
+    else:
         st.stop()
 
-try: 
+try:
     vals = prepare(df)
-except Exception as e: 
+except Exception as e:
     st.error(str(e))
     st.stop()
 
-freq, rc, gaps, last, score = model(vals)
+# Sidebar - Modo de Auto-Aprendizaje
+st.sidebar.header("🤖 Modo de Auto-Aprendizaje")
+use_auto_weights = st.sidebar.toggle("Activar Auto-Optimización de Pesos", value=True)
+
+if use_auto_weights:
+    lookback_eval = st.sidebar.slider("Sorteos de evaluación para aprendizaje", 5, 50, 15)
+    auto_weights = get_adaptive_weights(vals, lookback=lookback_eval)
+    active_weights = auto_weights
+    st.sidebar.success("✅ Pesos ajustados según aciertos recientes")
+else:
+    active_weights = {"w_freq": 0.30, "w_rc10": 0.25, "w_rc30": 0.15, "w_rc20": 0.10, "w_gap": 0.15, "w_last": 0.05}
 
 # Sidebar - Filtros de Descarte
 st.sidebar.header("🧹 Filtros de Descarte Global")
-
 n_inter = st.sidebar.number_input("Sorteos (Rep. entre sorteos)", 2, len(vals), 15, key="n_inter")
 f_inter = st.sidebar.checkbox("Excluir rep. entre sorteos", value=False, key="f_inter")
 
@@ -201,12 +259,12 @@ if f_ult2 and len(vals) > 1: nums_a_excluir.update(vals[1])
 if nums_a_excluir:
     st.sidebar.warning(f"🚫 {len(nums_a_excluir)} números excluidos de los 100.")
 
-t1, t2, t3, t4, t5 = st.tabs(["🏆 Ranking", "🔗 Patrones", "🧹 Filtros/Descarte", "🧪 Backtesting", "🎟️ Generador"])
+freq, rc, gaps, last, score = model(vals, weights=active_weights)
+
+t1, t2, t3, t4, t5, t6 = st.tabs(["🏆 Ranking", "🔗 Patrones", "🧹 Filtros/Descarte", "🧪 Backtesting", "🎟️ Generador", "🤖 Auto-Optimización"])
 
 with t1:
     st.header("🏆 Ranking General y Números Validados")
-    
-    # Ranking General
     r_full = pd.DataFrame({
         "Ranking Gral": range(1, 101),
         "Número": [f"{x:02d}" for x in score.index],
@@ -218,8 +276,7 @@ with t1:
         "Atraso": [gaps[x] for x in score.index],
         "Último": ["SI" if x in last else "NO" for x in score.index]
     })
-    
-    # Ranking Filtrado (Solo No Excluidos)
+
     score_clean = score[~score.index.isin(nums_a_excluir)]
     r_clean = pd.DataFrame({
         "Ranking Activo": range(1, len(score_clean) + 1),
@@ -231,16 +288,15 @@ with t1:
         "Atraso": [gaps[x] for x in score_clean.index],
         "Último": ["SI" if x in last else "NO" for x in score_clean.index]
     })
-    
+
     col_rk1, col_rk2 = st.columns(2)
     with col_rk1:
         st.subheader("📊 Ranking Completo (100 números)")
         st.dataframe(r_full, use_container_width=True, height=600)
-    
     with col_rk2:
         st.subheader(f"✨ Ranking Filtrado ({len(r_clean)} números activos)")
         st.dataframe(r_clean, use_container_width=True, height=600)
-        
+
     st.download_button("Descargar Ranking Filtrado CSV", r_clean.to_csv(index=False).encode(), "ranking_filtrado.csv")
 
 with t2:
@@ -253,7 +309,7 @@ with t2:
     b.metric("Repeticiones internas", f"{np.mean(internal):.2f}")
     c.metric("Impares por sorteo", f"{np.mean(odd):.2f}")
     d.metric("Consecutivos", f"{np.mean(cons):.2f}")
-    
+
     pair = {}
     for row in vals:
         for a1, b1 in itertools.combinations(sorted(set(row)), 2):
@@ -266,8 +322,6 @@ with t2:
 
 with t3:
     st.header("🧹 Resumen de Filtros de Descarte Aplicados")
-    st.write("Ajustá los criterios en el panel de la izquierda (Sidebar) para excluir números dinámicamente.")
-    
     col1, col2, col3 = st.columns(3)
     with col1:
         st.subheader("🔄 Rep. entre sorteos")
@@ -288,11 +342,8 @@ with t3:
 
 with t4:
     st.header("🧪 Backtesting")
-    if nums_a_excluir:
-        st.info(f"ℹ️ Evaluando rendimiento excluyendo {len(nums_a_excluir)} números marcados en los filtros.")
-    
     cases = st.slider("Cantidad de sorteos históricos a evaluar", 20, 300, 100)
-    bt = backtest(vals, cases, exclude_nums=nums_a_excluir)
+    bt = backtest(vals, cases, exclude_nums=nums_a_excluir, weights=active_weights)
     if len(bt):
         avg = bt.Aciertos_Top20.mean()
         over = (bt.Aciertos_Top20 > 4).mean() * 100
@@ -302,17 +353,12 @@ with t4:
         c.metric("Casos > 4 aciertos", f"{over:.1f}%")
         st.dataframe(bt, use_container_width=True, height=500)
         st.download_button("Descargar backtesting CSV", bt.to_csv(index=False).encode(), "backtesting.csv")
-    else: 
-        st.warning("No hay suficientes sorteos.")
 
 with t5:
     st.header("🎟️ Generador Avanzado de Líneas")
-    
     col_g1, col_g2, col_g3 = st.columns(3)
-    
     with col_g1:
         line_size = st.number_input("Tamaño de línea (Números por jugada)", min_value=5, max_value=20, value=20, step=1)
-    
     with col_g2:
         strategy = st.selectbox("Estrategia de Generación", [
             "⚖️ Mixta Equilibrada",
@@ -322,17 +368,12 @@ with t5:
             "🔗 Arrastres Recientes",
             "🔄 Repetición Sorteo Anterior"
         ])
-        
     with col_g3:
         amount = st.slider("Cantidad de líneas", 5, 100, 20)
-    
+
     seed = st.number_input("Semilla de aleatoriedad", value=20260911, step=1)
-    
-    if nums_a_excluir:
-        st.info(f"ℹ️ Generando líneas de **{line_size} números** usando la estrategia **'{strategy}'** descartando {len(nums_a_excluir)} números.")
-        
+
     lines = generate(score, freq, gaps, last, vals, amount, seed, line_size=line_size, strategy=strategy, exclude_nums=nums_a_excluir)
-    
     if lines:
         cols = ["Línea"] + [f"N{i}" for i in range(1, line_size + 1)]
         out = pd.DataFrame(
@@ -341,3 +382,17 @@ with t5:
         )
         st.dataframe(out, use_container_width=True, height=650)
         st.download_button("Descargar líneas CSV", out.to_csv(index=False).encode(), "lineas.csv")
+
+with t6:
+    st.header("🤖 Evaluación de Aciertos y Optimización Adaptativa")
+    st.write("El sistema analiza la efectividad de cada factor en los sorteos pasados para recalibrar la importancia asignada a cada indicador estadístico.")
+
+    if use_auto_weights:
+        st.subheader("📊 Pesos Activos Calculados por Auto-Aprendizaje:")
+        w_df = pd.DataFrame({
+            "Indicador": ["Frecuencia Histórica", "Rendimiento Últimos 10", "Rendimiento Últimos 30", "Rendimiento Últimos 20", "Atrasos (Gaps)", "Presencia Último Sorteo"],
+            "Peso Ponderado": [f"{v*100:.1f}%" for v in active_weights.values()]
+        })
+        st.table(w_df)
+    else:
+        st.info("Para activar la optimización automática, habilitá la opción 'Activar Auto-Optimización de Pesos' en el panel lateral.")
