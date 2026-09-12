@@ -58,38 +58,81 @@ def analyze_consecutivos(vals, n):
                 cons.add(b)
     return cons
 
-def generate(score, amount, seed, exclude_nums=set()):
-    rng = random.Random(int(seed))
-    filtered_score = score[~score.index.isin(exclude_nums)]
-    top = list(filtered_score.index)
+def select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclude_nums):
+    # Filtrar descartados
+    available_score = score[~score.index.isin(exclude_nums)]
+    available = list(available_score.index)
     
-    if len(top) < 20:
-        st.error(f"Se descartaron demasiado números ({len(exclude_nums)} números excluidos). Quedan {len(top)} candidatos, pero se necesitan al menos 20 para armar las líneas.")
+    if len(available) < line_size:
+        return []
+
+    if strategy == "🔥 Números Calientes":
+        # Priorizar números con mayor frecuencia reciente/general
+        candidates = list(available_score.head(max(line_size * 2, 20)).index)
+    elif strategy == "🧊 Fríos / Atrasados":
+        # Priorizar números con mayor atraso (gap)
+        sorted_by_gap = pd.Series(gaps)[available].sort_values(ascending=False)
+        candidates = list(sorted_by_gap.head(max(line_size * 2, 20)).index)
+    elif strategy == "⚖️ Mixta Equilibrada":
+        # Balance entre calientes (top), fríos y medio
+        p1 = available[:max(1, int(len(available)*0.3))]
+        p2 = available[int(len(available)*0.3):int(len(available)*0.7)]
+        p3 = available[int(len(available)*0.7):]
+        candidates = p1 + p2 + p3
+    elif strategy == "🎯 Zonas Activas":
+        # Priorizar decenas con más actividad
+        decenas = pd.Series([x // 10 for x in available]).value_counts()
+        top_decenas = decenas.head(4).index
+        candidates = [x for x in available if x // 10 in top_decenas]
+    elif strategy == "🔗 Arrastres Recientes":
+        # Parejas frecuentes con el último sorteo
+        last_nums = set(vals[0])
+        pair_counts = {}
+        for row in vals[:20]:
+            for x in set(row):
+                if x in available:
+                    pair_counts[x] = pair_counts.get(x, 0) + 1
+        sorted_arrastre = sorted(pair_counts.keys(), key=lambda k: pair_counts[k], reverse=True)
+        candidates = sorted_arrastre if len(sorted_arrastre) >= line_size else available
+    elif strategy == "🔄 Repetición Sorteo Anterior":
+        # Forzar que incluya números de la jugada anterior (no descartados)
+        last_avail = [x for x in vals[0] if x in available]
+        candidates = last_avail + [x for x in available if x not in last_avail]
+    else:
+        candidates = available
+
+    if len(candidates) < line_size:
+        candidates = available
+
+    return candidates
+
+def generate(score, freq, gaps, last, vals, amount, seed, line_size=20, strategy="⚖️ Mixta Equilibrada", exclude_nums=set()):
+    rng = random.Random(int(seed))
+    
+    candidates = select_by_strategy(score, freq, gaps, last, vals, line_size, strategy, exclude_nums)
+    if len(candidates) < line_size:
+        st.error(f"No hay suficientes números candidatos ({len(candidates)}) para armar líneas de {line_size} números con los descartes actuales.")
         return []
 
     lines = []
-    p1 = max(1, int(len(top) * 0.35))
-    p2 = max(1, int(len(top) * 0.70))
-    
     for _ in range(amount):
         for _try in range(10000):
-            s1 = min(12, len(top[:p1]))
-            s2 = min(5, len(top[p1:p2]))
-            s3 = min(3, len(top[p2:]))
+            sample_k = min(len(candidates), max(line_size + 5, int(line_size * 1.5)))
+            pool = rng.sample(candidates[:sample_k], line_size)
+            comb = set(pool)
             
-            comb = set(rng.sample(top[:p1], s1) + rng.sample(top[p1:p2], s2) + rng.sample(top[p2:], s3))
-            
-            if len(comb) < 20:
-                rem = list(set(top) - comb)
-                comb.update(rng.sample(rem, 20 - len(comb)))
-
-            if len(comb) != 20: 
+            if len(comb) != line_size: 
                 continue
+            
+            # Validación de paridad y dispersión adaptada según el tamaño de la línea
             odd = sum(x % 2 for x in comb)
-            dc = pd.Series([x // 10 for x in comb]).value_counts()
-            if 8 <= odd <= 12 and dc.max() <= 4 and len(dc) >= 7 and not any(len(comb & set(o)) > 15 for o in lines):
+            min_odd = int(line_size * 0.35)
+            max_odd = int(line_size * 0.65) + 1
+            
+            if min_odd <= odd <= max_odd and not any(len(comb & set(o)) >= line_size for o in lines):
                 lines.append(sorted(comb))
                 break
+
     return lines
 
 def backtest(vals, cases, exclude_nums=set()):
@@ -100,7 +143,6 @@ def backtest(vals, cases, exclude_nums=set()):
             break
         _, _, _, _, s = model(hist)
         
-        # Filtrar score eliminando los números descartados
         s_filtered = s[~s.index.isin(exclude_nums)]
         top20 = list(s_filtered.index[:20])
         
@@ -134,7 +176,7 @@ except Exception as e:
 
 freq, rc, gaps, last, score = model(vals)
 
-# --- CONFIGURACIÓN DE FILTROS Y DESCARTE EN SIDEBAR O ANTES DE TABS ---
+# Sidebar - Filtros de Descarte
 st.sidebar.header("🧹 Filtros de Descarte Global")
 
 n_inter = st.sidebar.number_input("Sorteos (Rep. entre sorteos)", 2, len(vals), 15, key="n_inter")
@@ -149,7 +191,6 @@ f_cons = st.sidebar.checkbox("Excluir consecutivos", value=False, key="f_cons")
 f_ult1 = st.sidebar.checkbox("Excluir ÚLTIMO sorteo", value=False, key="f_ult1")
 f_ult2 = st.sidebar.checkbox("Excluir PENÚLTIMO sorteo", value=False, key="f_ult2")
 
-# Calcular conjunto de descartes
 nums_a_excluir = set()
 if f_inter: nums_a_excluir.update(analyze_rep_inter(vals, n_inter))
 if f_intra: nums_a_excluir.update(analyze_rep_intra(vals, n_intra))
@@ -163,21 +204,44 @@ if nums_a_excluir:
 t1, t2, t3, t4, t5 = st.tabs(["🏆 Ranking", "🔗 Patrones", "🧹 Filtros/Descarte", "🧪 Backtesting", "🎟️ Generador"])
 
 with t1:
-    r = pd.DataFrame({
-        "Ranking": range(1, 101),
+    st.header("🏆 Ranking General y Números Validados")
+    
+    # Ranking General
+    r_full = pd.DataFrame({
+        "Ranking Gral": range(1, 101),
         "Número": [f"{x:02d}" for x in score.index],
-        "Excluido": ["SI" if x in nums_a_excluir else "NO" for x in score.index],
+        "Estado": ["⛔ Excluido" if x in nums_a_excluir else "✅ Activo" for x in score.index],
         "Índice": [round(score[x], 2) for x in score.index],
         "Histórico": [int(freq[x]) for x in score.index],
-        "Últ.5": [int(rc[5][x]) for x in score.index],
         "Últ.10": [int(rc[10][x]) for x in score.index],
-        "Últ.20": [int(rc[20][x]) for x in score.index],
         "Últ.30": [int(rc[30][x]) for x in score.index],
         "Atraso": [gaps[x] for x in score.index],
         "Último": ["SI" if x in last else "NO" for x in score.index]
     })
-    st.dataframe(r, use_container_width=True, height=650)
-    st.download_button("Descargar ranking CSV", r.to_csv(index=False).encode(), "ranking.csv")
+    
+    # Ranking Filtrado (Solo No Excluidos)
+    score_clean = score[~score.index.isin(nums_a_excluir)]
+    r_clean = pd.DataFrame({
+        "Ranking Activo": range(1, len(score_clean) + 1),
+        "Número": [f"{x:02d}" for x in score_clean.index],
+        "Índice": [round(score_clean[x], 2) for x in score_clean.index],
+        "Histórico": [int(freq[x]) for x in score_clean.index],
+        "Últ.10": [int(rc[10][x]) for x in score_clean.index],
+        "Últ.30": [int(rc[30][x]) for x in score_clean.index],
+        "Atraso": [gaps[x] for x in score_clean.index],
+        "Último": ["SI" if x in last else "NO" for x in score_clean.index]
+    })
+    
+    col_rk1, col_rk2 = st.columns(2)
+    with col_rk1:
+        st.subheader("📊 Ranking Completo (100 números)")
+        st.dataframe(r_full, use_container_width=True, height=600)
+    
+    with col_rk2:
+        st.subheader(f"✨ Ranking Filtrado ({len(r_clean)} números activos)")
+        st.dataframe(r_clean, use_container_width=True, height=600)
+        
+    st.download_button("Descargar Ranking Filtrado CSV", r_clean.to_csv(index=False).encode(), "ranking_filtrado.csv")
 
 with t2:
     rep = [len(set(vals[i]) & set(vals[i+1])) for i in range(len(vals)-1)]
@@ -202,7 +266,7 @@ with t2:
 
 with t3:
     st.header("🧹 Resumen de Filtros de Descarte Aplicados")
-    st.write("Los controles de descarte se encuentran activos en la **barra lateral (Sidebar)** a la izquierda para aplicarse globalmente a todas las pestañas.")
+    st.write("Ajustá los criterios en el panel de la izquierda (Sidebar) para excluir números dinámicamente.")
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -242,18 +306,38 @@ with t4:
         st.warning("No hay suficientes sorteos.")
 
 with t5:
-    st.header("🎟️ Generador de Líneas")
-    amount = st.slider("Cantidad de líneas", 5, 100, 20)
-    seed = st.number_input("Semilla", value=20260911, step=1)
+    st.header("🎟️ Generador Avanzado de Líneas")
+    
+    col_g1, col_g2, col_g3 = st.columns(3)
+    
+    with col_g1:
+        line_size = st.number_input("Tamaño de línea (Números por jugada)", min_value=5, max_value=20, value=20, step=1)
+    
+    with col_g2:
+        strategy = st.selectbox("Estrategia de Generación", [
+            "⚖️ Mixta Equilibrada",
+            "🔥 Números Calientes",
+            "🧊 Fríos / Atrasados",
+            "🎯 Zonas Activas",
+            "🔗 Arrastres Recientes",
+            "🔄 Repetición Sorteo Anterior"
+        ])
+        
+    with col_g3:
+        amount = st.slider("Cantidad de líneas", 5, 100, 20)
+    
+    seed = st.number_input("Semilla de aleatoriedad", value=20260911, step=1)
     
     if nums_a_excluir:
-        st.info(f"ℹ️ Generando líneas excluyendo {len(nums_a_excluir)} números descartados.")
+        st.info(f"ℹ️ Generando líneas de **{line_size} números** usando la estrategia **'{strategy}'** descartando {len(nums_a_excluir)} números.")
         
-    lines = generate(score, amount, seed, exclude_nums=nums_a_excluir)
+    lines = generate(score, freq, gaps, last, vals, amount, seed, line_size=line_size, strategy=strategy, exclude_nums=nums_a_excluir)
+    
     if lines:
+        cols = ["Línea"] + [f"N{i}" for i in range(1, line_size + 1)]
         out = pd.DataFrame(
             [[i + 1] + [f"{x:02d}" for x in line] for i, line in enumerate(lines)],
-            columns=["Línea"] + [f"N{i}" for i in range(1, 21)]
+            columns=cols
         )
         st.dataframe(out, use_container_width=True, height=650)
         st.download_button("Descargar líneas CSV", out.to_csv(index=False).encode(), "lineas.csv")
