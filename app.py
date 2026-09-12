@@ -32,36 +32,35 @@ def model(vals):
                    .05 * pct(pd.Series({x: int(x in last) for x in nums})))
     return freq, rc, gaps, last, score.sort_values(ascending=False)
 
-def analyze_patterns(vals, n_sorteos):
-    # Analizar solo los últimos n_sorteos
-    sub_vals = vals[:min(len(vals), n_sorteos)]
-    
-    # Repetidos entre sorteos consecutivos
-    rep_inter = set()
-    for i in range(len(sub_vals) - 1):
-        inter = set(sub_vals[i]) & set(sub_vals[i+1])
-        rep_inter.update(inter)
-        
-    # Repeticiones internas (números repetidos dentro del mismo extracto)
-    rep_intra = set()
-    for row in sub_vals:
+# Funciones independientes para analizar cada patrón según su propia cantidad de sorteos
+def analyze_rep_inter(vals, n):
+    sub = vals[:min(len(vals), n)]
+    rep = set()
+    for i in range(len(sub) - 1):
+        rep.update(set(sub[i]) & set(sub[i+1]))
+    return rep
+
+def analyze_rep_intra(vals, n):
+    sub = vals[:min(len(vals), n)]
+    rep = set()
+    for row in sub:
         counts = pd.Series(row).value_counts()
-        rep_intra.update(counts[counts > 1].index)
-        
-    # Consecutivos
-    consecutivos = set()
-    for row in sub_vals:
+        rep.update(counts[counts > 1].index)
+    return rep
+
+def analyze_consecutivos(vals, n):
+    sub = vals[:min(len(vals), n)]
+    cons = set()
+    for row in sub:
         sorted_row = sorted(set(row))
         for a, b in zip(sorted_row, sorted_row[1:]):
             if b == a + 1:
-                consecutivos.add(a)
-                consecutivos.add(b)
-                
-    return rep_inter, rep_intra, consecutivos
+                cons.add(a)
+                cons.add(b)
+    return cons
 
 def generate(score, amount, seed, exclude_nums=set()):
     rng = random.Random(int(seed))
-    # Filtrar el ranking para remover los números excluidos
     filtered_score = score[~score.index.isin(exclude_nums)]
     top = list(filtered_score.index)
     
@@ -81,7 +80,6 @@ def generate(score, amount, seed, exclude_nums=set()):
             
             comb = set(rng.sample(top[:p1], s1) + rng.sample(top[p1:p2], s2) + rng.sample(top[p2:], s3))
             
-            # Completar hasta 20 si faltan por límites de tamaño
             if len(comb) < 20:
                 rem = list(set(top) - comb)
                 comb.update(rng.sample(rem, 20 - len(comb)))
@@ -173,35 +171,56 @@ with t2:
 
 with t3:
     st.header("🧹 Descarte de Números por Patrones Recientes")
-    n_sorteos = st.number_input("Cantidad de últimos sorteos a analizar", min_value=1, max_value=len(vals), value=15, step=1)
-    
-    rep_inter, rep_intra, consecutivos = analyze_patterns(vals, n_sorteos)
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
         st.subheader("🔄 Repetidos entre sorteos")
-        st.write(f"Aparecieron en sorteos consecutivos en los últimos {n_sorteos} sorteos:")
+        n_inter = st.number_input("Sorteos a analizar (Rep. entre sorteos)", min_value=2, max_value=len(vals), value=15, step=1, key="n_inter")
+        rep_inter = analyze_rep_inter(vals, n_inter)
         st.info(", ".join(f"{x:02d}" for x in sorted(rep_inter)) if rep_inter else "Ninguno")
-        filt_inter = st.checkbox("Excluir estos números del Generador", value=False, key="f_inter")
+        filt_inter = st.checkbox("Excluir repetidos entre sorteos", value=False, key="f_inter")
         
     with col2:
         st.subheader("🔁 Repeticiones internas")
-        st.write(f"Salió repetido dentro del mismo extracto en los últimos {n_sorteos} sorteos:")
+        n_intra = st.number_input("Sorteos a analizar (Rep. internas)", min_value=1, max_value=len(vals), value=10, step=1, key="n_intra")
+        rep_intra = analyze_rep_intra(vals, n_intra)
         st.info(", ".join(f"{x:02d}" for x in sorted(rep_intra)) if rep_intra else "Ninguno")
-        filt_intra = st.checkbox("Excluir estos números del Generador", value=False, key="f_intra")
+        filt_intra = st.checkbox("Excluir repeticiones internas", value=False, key="f_intra")
         
     with col3:
         st.subheader("🔢 Consecutivos")
-        st.write(f"Formaron parejas consecutivas en los últimos {n_sorteos} sorteos:")
+        n_cons = st.number_input("Sorteos a analizar (Consecutivos)", min_value=1, max_value=len(vals), value=15, step=1, key="n_cons")
+        consecutivos = analyze_consecutivos(vals, n_cons)
         st.info(", ".join(f"{x:02d}" for x in sorted(consecutivos)) if consecutivos else "Ninguno")
-        filt_cons = st.checkbox("Excluir estos números del Generador", value=False, key="f_cons")
+        filt_cons = st.checkbox("Excluir consecutivos", value=False, key="f_cons")
 
-    # Armar lista final de números excluidos
+    st.divider()
+    
+    # Módulo adicional: Último y Penúltimo Sorteo
+    st.subheader("📌 Descarte del Último y Penúltimo Sorteo")
+    col_u1, col_u2 = st.columns(2)
+    
+    ult_1 = set(vals[0])
+    ult_2 = set(vals[1]) if len(vals) > 1 else set()
+    
+    with col_u1:
+        st.write("**Último Sorteo (Sorteo más reciente):**")
+        st.info(", ".join(f"{x:02d}" for x in sorted(ult_1)))
+        filt_ult1 = st.checkbox("Excluir números del ÚLTIMO sorteo", value=False, key="f_ult1")
+        
+    with col_u2:
+        st.write("**Penúltimo Sorteo:**")
+        st.info(", ".join(f"{x:02d}" for x in sorted(ult_2)) if ult_2 else "No disponible")
+        filt_ult2 = st.checkbox("Excluir números del PENÚLTIMO sorteo", value=False, key="f_ult2")
+
+    # Consolidación final de números a descartar
     nums_a_excluir = set()
     if filt_inter: nums_a_excluir.update(rep_inter)
     if filt_intra: nums_a_excluir.update(rep_intra)
     if filt_cons: nums_a_excluir.update(consecutivos)
+    if filt_ult1: nums_a_excluir.update(ult_1)
+    if filt_ult2: nums_a_excluir.update(ult_2)
     
     st.divider()
     st.subheader(f"🚫 Total de números descartados ({len(nums_a_excluir)} de 100):")
@@ -226,7 +245,6 @@ with t5:
     amount = st.slider("Cantidad de líneas", 5, 100, 20)
     seed = st.number_input("Semilla", value=20260911, step=1)
     
-    # Recuperar lista de exclusión si está activa
     nums_excluidos_gen = nums_a_excluir if 'nums_a_excluir' in locals() else set()
     if nums_excluidos_gen:
         st.info(f"ℹ️ Generando líneas excluyendo {len(nums_excluidos_gen)} números marcados en la pestaña 'Filtros/Descarte'.")
